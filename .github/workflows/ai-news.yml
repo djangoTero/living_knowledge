@@ -1,0 +1,83 @@
+name: AI News Pipeline
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ai-news-pipeline
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests pyyaml
+
+      - name: Fetch daily items
+        env:
+          LOOKBACK_HOURS: ${{ secrets.LOOKBACK_HOURS || '12' }}
+          MAX_ITEMS: ${{ secrets.MAX_ITEMS || '20' }}
+          KEYWORDS: ${{ secrets.KEYWORDS || 'artificial intelligence OR generative AI OR LLM OR machine learning' }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CH_DAILY: ${{ secrets.SLACK_CH_DAILY }}
+          SUBSTACK_FEEDS: ${{ secrets.SUBSTACK_FEEDS }}
+          PREVIEW_JSON: preview.json
+        run: python scripts/fetch_and_post_daily.py
+
+      - name: Promote and expire
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CH_DAILY: ${{ secrets.SLACK_CH_DAILY }}
+          SLACK_CH_WEEKLY: ${{ secrets.SLACK_CH_WEEKLY }}
+          SLACK_CH_MONTHLY: ${{ secrets.SLACK_CH_MONTHLY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python scripts/promote_and_expire.py
+
+      - name: Check changes
+        id: check
+        run: |
+          git status --short
+          if git status --short news state | grep .; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit changes
+        if: ${{ steps.check.outputs.changed == 'true' }}
+        run: |
+          git config user.name 'codex-bot'
+          git config user.email 'codex@example.com'
+          git commit -am 'chore: sync ai news state' || echo 'No changes to commit'
+
+      - name: Push changes
+        if: ${{ steps.check.outputs.changed == 'true' }}
+        run: git push
+
+  validate-schema:
+    needs: run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pyyaml
+      - name: Validate news schema
+        run: python scripts/validate_news_schema.py
