@@ -1,0 +1,10 @@
+# Default domain weights for accuracy scoring in the AI news pipeline.
+default: 0.5
+weights:
+  arxiv.org: 0.8
+  openai.com: 0.9
+  deepmind.com: 0.9
+  huggingface.co: 0.8
+  googleblog.com: 0.8
+  microsoft.com: 0.8
+  nvidia.com: 0.8
