@@ -69,6 +69,24 @@ jobs:
       - name: Push changes
         if: ${{ steps.check.outputs.changed == 'true' }}
         run: git push
+  
+  codex-review:
+    needs: validate-schema
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Codex for AI News validation/summarization
+        id: run_codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: codex/ai-news.prompt.md 
+          # working-directory: .
+          # output-file: codex_output.md
+          # model: o3-mini
+          # codex-args: '["--max-iterations","1"]'
 
   validate-schema:
     needs: run
