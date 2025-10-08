@@ -4,7 +4,10 @@ on:
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
-
+permissions:
+  contents: write
+  pull-requests: write
+  
 concurrency:
   group: ai-news-pipeline
   cancel-in-progress: true
@@ -12,6 +15,16 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    env:
+      LOOKBACK_HOURS: ${{ vars.LOOKBACK_HOURS || '12' }}
+      MAX_ITEMS: ${{ vars.MAX_ITEMS || '20' }}
+      KEYWORDS: ${{ vars.KEYWORDS || 'artificial intelligence OR generative AI OR LLM OR machine learning' }}
+      SUBSTACK_FEEDS: ${{ vars.SUBSTACK_FEEDS }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CH_DAILY: ${{ secrets.SLACK_CH_DAILY }}
+      SLACK_CH_WEEKLY: ${{ secrets.SLACK_CH_WEEKLY }}
+      SLACK_CH_MONTHLY: ${{ secrets.SLACK_CH_MONTHLY }}
     outputs:
       changed: ${{ steps.check.outputs.changed }}
     steps:
@@ -26,7 +39,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests pyyaml
+        run: pip install -r requirements.txt
 
       - name: Fetch daily items
         env:
