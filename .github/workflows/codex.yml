@@ -1,0 +1,51 @@
+name: Codex Review & Fix
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "news/**"
+      - "state/**"
+      - "scripts/**"
+      - "domain_weights.yml"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  codex:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python (for local checks)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install pyyaml
+
+      - name: Run schema check (baseline)
+        run: python scripts/validate_news_schema.py || true
+
+      - name: Codex pass (analyze & fix)
+        uses: openai/codex-action@main
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        with:
+          prompt: |
+            You are an editor-bot for an AI news repo.
+            Goals:
+            1) Validate YAML front matter of news/*.md; fix missing/typed fields to match scripts/validate_news_schema.py.
+            2) Improve titles concisely; keep factual.
+            3) For items with low accuracy (<0.7) add a note in body “Needs corroboration”.
+            4) Suggest promotions (daily→weekly→monthly) as PR review comments, unless confidence >0.9 then apply.
+            5) Keep markdown body format used by scripts/github_agent.py.
+            Inputs to read: news/**/*.md, domain_weights.yml, state/items.jsonl (if present).
+            Output:
+            - Commit safe fixes directly.
+            - Leave a PR review comment summarizing changes and any items you did not auto-fix.
+          files: |
+            news/**/*.md
+            domain_weights.yml
+            scripts/validate_news_schema.py
+          commit_message: "chore(codex): normalize news front matter & small edits"
