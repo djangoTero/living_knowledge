@@ -35,12 +35,15 @@ class NewsItem:
     ts_monthly: Optional[str] = None
     replies: int = 0
     pinned: bool = False
+    value_score: float = 0.0
 
     def to_json(self) -> Dict[str, object]:
         return dataclasses.asdict(self)
 
     @staticmethod
     def from_json(data: Dict[str, object]) -> "NewsItem":
+        # value_score geri uyumluluk
+        data.setdefault("value_score", 0.0)
         return NewsItem(**data)
 
 
@@ -131,7 +134,7 @@ def to_utc(dt_value: dt.datetime) -> dt.datetime:
 
 
 def load_domain_weights(path: pathlib.Path = DOMAIN_WEIGHTS_PATH) -> Dict[str, float]:
-    default_weight = 0.5
+    default_weight = 0.4
     weights: Dict[str, float] = {}
     if not path.exists():
         logging.warning("Domain weights file %s not found. Using default weight %s", path, default_weight)
@@ -153,7 +156,7 @@ def domain_weight_for(url: str, weights: Dict[str, float]) -> float:
         if "." not in domain:
             break
         domain = domain.split(".", 1)[1]
-    return weights.get("__default__", 0.5)
+    return weights.get("__default__", 0.4)
 
 
 def compute_recency_score(published: dt.datetime, now: Optional[dt.datetime] = None, lookback_hours: int = 12) -> float:
@@ -169,13 +172,6 @@ def compute_accuracy(domain_weight: float, corroborations: int, recency: float) 
     return round(domain_weight + corroborations + recency, 3)
 
 
-def require_env(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        raise RuntimeError(f"Environment variable {name} is required")
-    return value
-
-
 def ensure_dir(path: pathlib.Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -189,7 +185,7 @@ def write_file(path: pathlib.Path, content: str) -> None:
 
 
 def group_by_status(items: Iterable[NewsItem]) -> Dict[str, List[NewsItem]]:
-    buckets: Dict[str, List[NewsItem]] = {"daily": [], "weekly": [], "monthly": []}
+    buckets: Dict[str, List[NewsItem]] = {"daily": [], "weekly": [], "monthly": [], "archived": []}
     for item in items:
         buckets.setdefault(item.status, []).append(item)
     for bucket in buckets.values():
