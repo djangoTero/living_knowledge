@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """GitHub agent that mirrors the news state into Markdown content."""
 from __future__ import annotations
 
@@ -15,7 +14,7 @@ import requests
 from common import NewsItem, StateStore, configure_logging, group_by_status, write_file
 
 GITHUB_API = "https://api.github.com"
-DEFAULT_BRANCH = os.environ.get("GITHUB_BASE_BRANCH", "work")
+DEFAULT_BRANCH = os.environ.get("DEFAULT_BRANCH", os.environ.get("GITHUB_BASE_BRANCH", "main"))
 PR_BRANCH_PREFIX = os.environ.get("PR_BRANCH_PREFIX", "auto/ai-news/")
 NEWS_DIR = pathlib.Path("news")
 INDEX_PATH = NEWS_DIR / "index.md"
@@ -37,6 +36,7 @@ def build_markdown(item: NewsItem) -> str:
         "ts_daily": item.ts_daily,
         "ts_weekly": item.ts_weekly,
         "ts_monthly": item.ts_monthly,
+        "value_score": item.value_score,
     }
     header_lines = ["---"]
     for key, value in front_matter.items():
@@ -49,8 +49,8 @@ def build_markdown(item: NewsItem) -> str:
 def render_index(groups: Dict[str, List[NewsItem]]) -> str:
     now = dt.datetime.now(dt.timezone.utc)
     lines = ["# AI News Digest", "", f"_Updated {now.isoformat()}_", ""]
-    order = ["daily", "weekly", "monthly"]
-    titles = {"daily": "Daily Highlights", "weekly": "Weekly Spotlight", "monthly": "Monthly Archive"}
+    order = ["daily", "weekly", "monthly", "archived"]
+    titles = {"daily": "Daily Highlights", "weekly": "Weekly Spotlight", "monthly": "Monthly Archive", "archived": "Archived"}
     for status in order:
         lines.append(f"## {titles[status]}")
         lines.append("")
@@ -133,9 +133,11 @@ class GitHubAgent:
         self._ensure_repo()
         branch_name = f"{PR_BRANCH_PREFIX}{branch_suffix}"
         logging.info("Preparing PR %s", branch_name)
-        # Fetch default branch sha
+        # Fetch default branch ref and commit
         ref = self._request("GET", f"/repos/{self.repo}/git/ref/heads/{DEFAULT_BRANCH}")
         base_sha = ref["object"]["sha"]
+        base_commit = self._request("GET", f"/repos/{self.repo}/git/commits/{base_sha}")
+        base_tree_sha = base_commit["tree"]["sha"]
         # Create branch
         try:
             self._request(
@@ -153,7 +155,7 @@ class GitHubAgent:
         tree = self._request(
             "POST",
             f"/repos/{self.repo}/git/trees",
-            json={"base_tree": base_sha, "tree": tree_entries},
+            json={"base_tree": base_tree_sha, "tree": tree_entries},
         )
         # Create commit
         commit = self._request(
