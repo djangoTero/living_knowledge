@@ -54,6 +54,14 @@ class SlackClient:
         response.raise_for_status()
         data = response.json()
         if not data.get("ok"):
+            error = data.get("error", "unknown_error")
+            if error == "not_in_channel":
+                logging.warning(
+                    "Slack bot is not a member of %s; skipping post for '%s'",
+                    channel,
+                    text[:120],
+                )
+                return None
             raise RuntimeError(f"Slack error: {data}")
         return data.get("ts")
 
@@ -229,25 +237,50 @@ def enrich_fields(item: Dict[str, str]) -> Tuple[str, str, str]:
         return meaning, impact, affected
 
     # Optional OpenAI enrichment
-    try:
-        import openai
+    prompt = (
+        "You are categorizing AI news. Return JSON with fields meaning, impact, affected. "
+        f"Title: {item['title']}"
+    )
 
-        openai.api_key = openai_key
-        prompt = (
-            "You are categorizing AI news. Return JSON with fields meaning, impact, affected. "
-            f"Title: {item['title']}"
-        )
-        response = openai.ChatCompletion.create(
+    try:
+        from openai import OpenAI  # type: ignore
+
+        client = OpenAI(api_key=openai_key)
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
         )
-        content = response["choices"][0]["message"]["content"].strip()
-        data = json.loads(content)
-        return data.get("meaning", ""), data.get("impact", ""), data.get("affected", "")
+        message_content = response.choices[0].message.content
+        if isinstance(message_content, list):
+            content = "".join(part.text for part in message_content if getattr(part, "text", None))
+        else:
+            content = message_content or ""
+    except ImportError:
+        try:
+            import openai
+
+            openai.api_key = openai_key
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+            )
+            content = response["choices"][0]["message"]["content"]
+        except Exception as exc:  # pragma: no cover
+            logging.warning("OpenAI enrichment failed: %s", exc)
+            return "AI news", "General", "General audience"
     except Exception as exc:  # pragma: no cover
         logging.warning("OpenAI enrichment failed: %s", exc)
         return "AI news", "General", "General audience"
+
+    try:
+        data = json.loads(content.strip())
+    except Exception as exc:  # pragma: no cover
+        logging.warning("Failed to parse OpenAI response: %s", exc)
+        return "AI news", "General", "General audience"
+
+    return data.get("meaning", ""), data.get("impact", ""), data.get("affected", "")
 
 
 def build_slack_blocks(item: NewsItem) -> List[Dict]:
