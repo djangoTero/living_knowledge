@@ -144,4 +144,121 @@ def should_promote_monthly(item: NewsItem, now: dt.datetime) -> bool:
     return item.value_score >= PROMOTE_MONTHLY_SCORE or item.corroborations >= 3 or item.replies >= 5
 
 
-def slack_ts
+def slack_ts_to_datetime(ts: str) -> dt.datetime:
+    seconds = float(ts)
+    return dt.datetime.fromtimestamp(seconds, tz=dt.timezone.utc)
+
+
+def expired(item: NewsItem, now: dt.datetime) -> bool:
+    base = TTL_DAILY_HOURS if item.status == "daily" else TTL_WEEKLY_HOURS if item.status == "weekly" else TTL_MONTHLY_HOURS
+    ttl = dynamic_ttl_hours(base, item.value_score)
+    ts: Optional[dt.datetime] = None
+    if item.status == "daily" and item.ts_daily:
+        ts = slack_ts_to_datetime(item.ts_daily)
+    if item.status == "weekly" and item.ts_weekly:
+        ts = slack_ts_to_datetime(item.ts_weekly)
+    if item.status == "monthly" and item.ts_monthly:
+        ts = slack_ts_to_datetime(item.ts_monthly)
+    if not ts:
+        return False
+    return (now - ts).total_seconds() / 3600 >= ttl
+
+
+def update_overview(slack: SlackMetricsClient, channel: Optional[str], items: Iterable[NewsItem], ts: Optional[str]) -> Optional[str]:
+    if not channel:
+        return ts
+    items_list = list(items)
+    counts = len(items_list)
+    avg_score = round(sum(i.value_score for i in items_list) / counts, 3) if counts else 0.0
+    text = f"AI news live overview: {counts} active stories | avg ValueScore {avg_score}"
+    return slack.post_overview(channel, text, ts)
+
+
+def load_overview_state() -> Dict[str, str]:
+    if not OVERVIEW_STATE_PATH.exists():
+        return {}
+    return json.loads(OVERVIEW_STATE_PATH.read_text(encoding="utf-8"))
+
+
+def save_overview_state(data: Dict[str, str]) -> None:
+    OVERVIEW_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    OVERVIEW_STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    configure_logging()
+    store = StateStore()
+    store.load()
+    slack = SlackMetricsClient(token=None if args.dry_run else SLACK_BOT_TOKEN)
+    now = dt.datetime.now(dt.timezone.utc)
+
+    # Update metrics
+    channel_map = {"daily": SLACK_CH_DAILY, "weekly": SLACK_CH_WEEKLY, "monthly": SLACK_CH_MONTHLY}
+    for item in store.values():
+        ts = item.ts_daily if item.status == "daily" else item.ts_weekly if item.status == "weekly" else item.ts_monthly
+        channel = channel_map.get(item.status)
+        if not ts or not channel:
+            continue
+        metrics = slack.fetch_metrics(channel, ts)
+        item.replies = int(metrics.get("replies", item.replies))
+        item.pinned = bool(metrics.get("pinned", item.pinned)) or int(metrics.get("pushpins", 0)) > 0
+        item.value_score = value_score(item, now)
+
+    promotions: List[NewsItem] = []
+    removals: List[NewsItem] = []
+    archives: List[NewsItem] = []
+    for item in list(store.values()):
+        if item.status == "daily" and should_promote_weekly(item, now):
+            item.status = "weekly"
+            item.ts_weekly = item.ts_weekly or item.ts_daily
+            promotions.append(item)
+        if item.status == "weekly" and should_promote_monthly(item, now):
+            item.status = "monthly"
+            item.ts_monthly = item.ts_monthly or item.ts_weekly
+            promotions.append(item)
+        if expired(item, now):
+            if item.status == "monthly" and item.value_score >= 0.9:
+                item.status = "archived"
+                archives.append(item)
+            else:
+                removals.append(item)
+
+    for item in removals:
+        channel = channel_map.get(item.status)
+        ts = item.ts_daily if item.status == "daily" else item.ts_weekly if item.status == "weekly" else item.ts_monthly
+        if channel and ts:
+            slack.delete_message(channel, ts)
+        store.remove(item.id)
+
+    for item in promotions + archives:
+        store.upsert(item)
+    store.save()
+
+    # Sync markdown / PR
+    agent = GitHubAgent(token=os.environ.get("GITHUB_TOKEN"), repo=os.environ.get("GITHUB_REPOSITORY"))
+    if args.dry_run:
+        agent.sync_to_filesystem(store.values())
+    else:
+        agent.sync(store.values())
+
+    # Update overviews
+    overview_state = load_overview_state()
+    overview_state["daily"] = update_overview(
+        slack, SLACK_CH_DAILY, filter(lambda i: i.status == "daily", store.values()), overview_state.get("daily")
+    )
+    overview_state["weekly"] = update_overview(
+        slack, SLACK_CH_WEEKLY, filter(lambda i: i.status == "weekly", store.values()), overview_state.get("weekly")
+    )
+    overview_state["monthly"] = update_overview(
+        slack, SLACK_CH_MONTHLY, filter(lambda i: i.status == "monthly", store.values()), overview_state.get("monthly")
+    )
+    save_overview_state({k: v for k, v in overview_state.items() if v})
+
+
+if __name__ == "__main__":
+    main()
+
