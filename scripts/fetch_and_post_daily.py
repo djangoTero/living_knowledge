@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Fetches AI news and posts fresh items to Slack."""
 from __future__ import annotations
 
@@ -29,11 +28,18 @@ USER_AGENT = "ai-news-pipeline/1.0"
 DEFAULT_LOOKBACK_HOURS = int(os.environ.get("LOOKBACK_HOURS", "12"))
 MAX_ITEMS = int(os.environ.get("MAX_ITEMS", "20"))
 KEYWORDS = os.environ.get(
-    "KEYWORDS", "artificial intelligence OR generative AI OR LLM OR machine learning"
+    "KEYWORDS", '"generative AI" OR "large language model" OR LLM OR "diffusion model" OR "AI safety" OR "machine learning model"'
 )
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_CH_DAILY = os.environ.get("SLACK_CH_DAILY", "#ai-daily")
+LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4.1-mini")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+
+AI_DOMAINS = {
+    "openai.com", "deepmind.com", "deepmind.google", "anthropic.com", "huggingface.co", "stability.ai",
+    "cohere.ai", "nvidia.com", "research.google", "googleblog.com", "ai.facebook.com", "meta.com",
+}
 
 class SlackClient:
     """Lightweight Slack client that no-ops when credentials are missing."""
@@ -48,7 +54,9 @@ class SlackClient:
             logging.info("[DRY RUN] Would post to %s: %s", channel, text[:120])
             return None
         url = "https://slack.com/api/chat.postMessage"
-        payload = {"channel": channel, "text": text, "blocks": json.dumps(blocks) if blocks else None}
+        payload = {"channel": channel, "text": text}
+        if blocks:
+            payload["blocks"] = json.dumps(blocks)
         headers = {"Authorization": f"Bearer {self.token}"}
         response = self.session.post(url, data=payload, headers=headers, timeout=30)
         response.raise_for_status()
@@ -56,14 +64,18 @@ class SlackClient:
         if not data.get("ok"):
             error = data.get("error", "unknown_error")
             if error == "not_in_channel":
-                logging.warning(
-                    "Slack bot is not a member of %s; skipping post for '%s'",
-                    channel,
-                    text[:120],
-                )
+                logging.warning("Slack bot is not a member of %s; skipping post for '%s'", channel, text[:120])
                 return None
             raise RuntimeError(f"Slack error: {data}")
         return data.get("ts")
+
+
+def _looks_ai_related(title: str, source: str, url: str) -> bool:
+    t = (title or "").lower()
+    if any(k in t for k in ["ai", "llm", "large language model", "transformer", "diffusion", "rlhf", "genai"]):
+        return True
+    host = re.sub(r"^www\.", "", re.sub(r"^https?://", "", url)).split("/")[0]
+    return host in AI_DOMAINS
 
 
 class FeedFetcher:
@@ -80,7 +92,7 @@ class FeedFetcher:
         items.extend(self._fetch_curated_feeds())
         items.extend(self._fetch_substack_feeds())
         logging.info("Fetched %d raw items", len(items))
-        return items
+        return [i for i in items if _looks_ai_related(i.get("title", ""), i.get("source", ""), i.get("url", ""))]
 
     def _fetch_gdelt(self) -> List[Dict[str, str]]:
         params = {
@@ -103,14 +115,12 @@ class FeedFetcher:
             published = entry.get("seendate") or entry.get("publishedDate")
             if not published:
                 continue
-            results.append(
-                {
-                    "url": entry.get("url"),
-                    "title": entry.get("title"),
-                    "source": entry.get("source", "GDELT"),
-                    "published": entry.get("seendate"),
-                }
-            )
+            results.append({
+                "url": entry.get("url"),
+                "title": entry.get("title"),
+                "source": entry.get("source", "GDELT"),
+                "published": entry.get("seendate"),
+            })
         return results
 
     def _fetch_google_news(self) -> List[Dict[str, str]]:
@@ -120,11 +130,7 @@ class FeedFetcher:
 
     def _fetch_hn(self) -> List[Dict[str, str]]:
         cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=self.lookback_hours)
-        params = {
-            "tags": "story",
-            "query": KEYWORDS,
-            "numericFilters": f"created_at_i>{int(cutoff.timestamp())}",
-        }
+        params = {"tags": "story", "query": KEYWORDS, "numericFilters": f"created_at_i>{int(cutoff.timestamp())}"}
         url = "https://hn.algolia.com/api/v1/search"
         response = self.session.get(url, params=params, timeout=30)
         response.raise_for_status()
@@ -133,14 +139,12 @@ class FeedFetcher:
         for hit in data.get("hits", []):
             if not hit.get("url"):
                 continue
-            results.append(
-                {
-                    "url": hit["url"],
-                    "title": hit.get("title") or hit.get("story_title"),
-                    "source": "Hacker News",
-                    "published": hit.get("created_at"),
-                }
-            )
+            results.append({
+                "url": hit["url"],
+                "title": hit.get("title") or hit.get("story_title"),
+                "source": "Hacker News",
+                "published": hit.get("created_at"),
+            })
         return results
 
     def _fetch_curated_feeds(self) -> List[Dict[str, str]]:
@@ -198,14 +202,12 @@ def parse_rss(text: str, source: str) -> List[Dict[str, str]]:
             href = link_el.attrib.get("href")
             if not href:
                 continue
-            items.append(
-                {
-                    "url": href,
-                    "title": (title_el.text or "").strip(),
-                    "source": source,
-                    "published": (updated_el.text if updated_el is not None else ""),
-                }
-            )
+            items.append({
+                "url": href,
+                "title": (title_el.text or "").strip(),
+                "source": source,
+                "published": (updated_el.text if updated_el is not None else ""),
+            })
         return items
 
     for item in channel.findall("item"):
@@ -218,78 +220,71 @@ def parse_rss(text: str, source: str) -> List[Dict[str, str]]:
     return items
 
 
-def enrich_fields(item: Dict[str, str]) -> Tuple[str, str, str]:
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    if not openai_key:
-        # Simple heuristics
-        text = f"{item['title']} {item['source']}"
-        meaning = "Update in AI ecosystem"
-        impact = "Industry"
-        affected = "Researchers"
-        if "launch" in text.lower():
-            meaning = "Product launch"
-            impact = "Product"
-            affected = "Customers"
-        elif "funding" in text.lower():
-            meaning = "Investment"
-            impact = "Finance"
-            affected = "Investors"
-        return meaning, impact, affected
+# -------- Batched enrichment --------
 
-    # Optional OpenAI enrichment
-    prompt = (
-        "You are categorizing AI news. Return JSON with fields meaning, impact, affected. "
-        f"Title: {item['title']}"
-    )
+def enrich_batch(items: List[Dict[str, str]]) -> Dict[str, Tuple[str, str, str]]:
+    """Return mapping id -> (meaning, impact, affected). Falls back to heuristics."""
+    # Heuristic fast path if no key
+    if not OPENAI_API_KEY:
+        out: Dict[str, Tuple[str, str, str]] = {}
+        for it in items:
+            t = f"{it.get('title','')} {it.get('source','')}".lower()
+            meaning, impact, affected = "AI update", "General", "Researchers"
+            if "launch" in t:
+                meaning, impact, affected = "Product launch", "Product", "Customers"
+            elif "funding" in t:
+                meaning, impact, affected = "Investment", "Finance", "Investors"
+            out[it["id"]] = (meaning, impact, affected)
+        return out
 
     try:
         from openai import OpenAI  # type: ignore
+    except Exception:
+        OPENAI_FALLBACK = True
+    else:
+        OPENAI_FALLBACK = False
 
-        client = OpenAI(api_key=openai_key)
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
-        message_content = response.choices[0].message.content
-        if isinstance(message_content, list):
-            content = "".join(part.text for part in message_content if getattr(part, "text", None))
-        else:
-            content = message_content or ""
-    except ImportError:
-        try:
-            import openai
-
-            openai.api_key = openai_key
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-            )
-            content = response["choices"][0]["message"]["content"]
-        except Exception as exc:  # pragma: no cover
-            logging.warning("OpenAI enrichment failed: %s", exc)
-            return "AI news", "General", "General audience"
-    except Exception as exc:  # pragma: no cover
-        logging.warning("OpenAI enrichment failed: %s", exc)
-        return "AI news", "General", "General audience"
+    payload = [{"id": it["id"], "title": it.get("title", ""), "source": it.get("source", "")} for it in items]
+    prompt = {
+        "task": "Categorize AI news items. For each, return meaning, impact, affected.",
+        "schema": {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "meaning": {"type": "string"}, "impact": {"type": "string"}, "affected": {"type": "string"}}, "required": ["id", "meaning", "impact", "affected"]}}}, "required": ["items"]},
+        "items": payload,
+    }
 
     try:
-        data = json.loads(content.strip())
-    except Exception as exc:  # pragma: no cover
-        logging.warning("Failed to parse OpenAI response: %s", exc)
-        return "AI news", "General", "General audience"
-
-    return data.get("meaning", ""), data.get("impact", ""), data.get("affected", "")
+        if not OPENAI_FALLBACK:
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            resp = client.chat.completions.create(
+                model=LLM_MODEL,
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": json.dumps(prompt)}],
+                temperature=0,
+            )
+            content = resp.choices[0].message.content or "{}"
+        else:
+            import openai  # type: ignore
+            openai.api_key = OPENAI_API_KEY
+            resp = openai.ChatCompletion.create(
+                model=LLM_MODEL,
+                messages=[{"role": "user", "content": json.dumps(prompt)}],
+                temperature=0,
+            )
+            content = resp["choices"][0]["message"]["content"]
+        data = json.loads(content)
+        results = {it["id"]: (it.get("meaning", "AI news"), it.get("impact", "General"), it.get("affected", "General")) for it in data.get("items", [])}
+        return results
+    except Exception as exc:  # Robust fallback
+        logging.warning("OpenAI enrichment failed: %s", exc)
+        out: Dict[str, Tuple[str, str, str]] = {}
+        for it in items:
+            out[it["id"]] = ("AI news", "General", "General")
+        return out
 
 
 def build_slack_blocks(item: NewsItem) -> List[Dict]:
     context = f"Accuracy: {item.accuracy} | Source: {item.source}"
     return [
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*<{item.url}|{item.title}>*"},
-        },
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*<{item.url}|{item.title}>*"}},
         {"type": "context", "elements": [{"type": "mrkdwn", "text": context}]},
     ]
 
@@ -349,7 +344,11 @@ def main() -> None:
     weights = load_domain_weights()
 
     now = dt.datetime.now(dt.timezone.utc)
-    candidates: List[NewsItem] = []
+
+    # Hazırlık: batch enrichment girişleri
+    batch_input: List[Dict[str, str]] = []
+    pre_candidates: List[Dict[str, object]] = []
+
     for normalized, item in deduped.items():
         published_raw = item.get("published") or now.isoformat()
         parsed = None
@@ -370,7 +369,8 @@ def main() -> None:
             try:
                 parsed = dt.datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
             except ValueError:
-                parsed = now
+                # Tarihi yoksa en taze sayma: 24 saat eski kabul et
+                parsed = now - dt.timedelta(hours=24)
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=dt.timezone.utc)
         published_utc = parsed.astimezone(dt.timezone.utc)
@@ -378,17 +378,32 @@ def main() -> None:
         domain_weight = domain_weight_for(item["url"], weights)
         corroborations = item.get("corroborations", 0)
         accuracy = compute_accuracy(domain_weight, corroborations, recency)
-        meaning, impact, affected = enrich_fields(item)
         item_id = make_item_id(item["url"])
+        pre_candidates.append({
+            "id": item_id,
+            "url": item["url"],
+            "title": item.get("title") or "(untitled)",
+            "source": item.get("source") or "unknown",
+            "published_utc": published_utc.isoformat(),
+            "accuracy": accuracy,
+            "corroborations": corroborations,
+        })
+        batch_input.append({"id": item_id, "title": item.get("title") or "", "source": item.get("source") or ""})
+
+    enrich_map = enrich_batch(batch_input)
+
+    candidates: List[NewsItem] = []
+    for raw in pre_candidates:
+        meaning, impact, affected = enrich_map.get(raw["id"], ("AI news", "General", "General"))
         candidate = NewsItem(
-            id=item_id,
-            url=item["url"],
-            title=item.get("title") or "(untitled)",
-            source=item.get("source") or "unknown",
-            published_utc=published_utc.isoformat(),
+            id=raw["id"],
+            url=raw["url"],
+            title=raw["title"],
+            source=raw["source"],
+            published_utc=raw["published_utc"],
             status="daily",
-            accuracy=accuracy,
-            corroborations=corroborations,
+            accuracy=float(raw["accuracy"]),
+            corroborations=int(raw["corroborations"]),
             meaning=meaning,
             impact=impact,
             affected=affected,
