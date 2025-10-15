@@ -4,10 +4,11 @@ on:
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
+
 permissions:
   contents: write
   pull-requests: write
-  
+
 concurrency:
   group: ai-news-pipeline
   cancel-in-progress: true
@@ -16,15 +17,23 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
+      # Non-sensitive defaults (repo Variables ile override edilebilir)
       LOOKBACK_HOURS: ${{ vars.LOOKBACK_HOURS || '12' }}
       MAX_ITEMS: ${{ vars.MAX_ITEMS || '20' }}
-      KEYWORDS: ${{ vars.KEYWORDS || 'artificial intelligence OR generative AI OR LLM OR machine learning' }}
-      SUBSTACK_FEEDS: ${{ vars.SUBSTACK_FEEDS }}
+      KEYWORDS: ${{ vars.KEYWORDS || '"generative AI" OR "large language model" OR LLM OR "diffusion model" OR "AI safety" OR "machine learning model"' }}
+      DOMAIN_WEIGHTS_PATH: ${{ vars.DOMAIN_WEIGHTS_PATH || 'domain_weights.yml' }}
+      STATE_PATH: ${{ vars.STATE_PATH || 'state/items.jsonl' }}
+      OVERVIEW_STATE_PATH: ${{ vars.OVERVIEW_STATE_PATH || 'state/overviews.json' }}
+      LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-4.1-mini' }}
+      DEFAULT_BRANCH: ${{ secrets.DEFAULT_BRANCH || vars.DEFAULT_BRANCH || 'main' }}
+      # Secrets
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
       SLACK_CH_DAILY: ${{ secrets.SLACK_CH_DAILY }}
       SLACK_CH_WEEKLY: ${{ secrets.SLACK_CH_WEEKLY }}
       SLACK_CH_MONTHLY: ${{ secrets.SLACK_CH_MONTHLY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
     outputs:
       changed: ${{ steps.check.outputs.changed }}
     steps:
@@ -43,23 +52,10 @@ jobs:
 
       - name: Fetch daily items
         env:
-          LOOKBACK_HOURS: ${{ secrets.LOOKBACK_HOURS || '12' }}
-          MAX_ITEMS: ${{ secrets.MAX_ITEMS || '20' }}
-          KEYWORDS: ${{ secrets.KEYWORDS || 'artificial intelligence OR generative AI OR LLM OR machine learning' }}
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CH_DAILY: ${{ secrets.SLACK_CH_DAILY }}
-          SUBSTACK_FEEDS: ${{ secrets.SUBSTACK_FEEDS }}
           PREVIEW_JSON: preview.json
         run: python scripts/fetch_and_post_daily.py
 
       - name: Promote and expire
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CH_DAILY: ${{ secrets.SLACK_CH_DAILY }}
-          SLACK_CH_WEEKLY: ${{ secrets.SLACK_CH_WEEKLY }}
-          SLACK_CH_MONTHLY: ${{ secrets.SLACK_CH_MONTHLY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
         run: python scripts/promote_and_expire.py
 
       - name: Check changes
@@ -77,29 +73,19 @@ jobs:
         run: |
           git config user.name 'codex-bot'
           git config user.email 'codex@example.com'
-          git commit -am 'chore: sync ai news state' || echo 'No changes to commit'
+          git add -A
+          git commit -m 'chore: sync ai news state' || echo 'No changes to commit'
 
       - name: Push changes
         if: ${{ steps.check.outputs.changed == 'true' }}
         run: git push
-  
-  codex-review:
-    needs: validate-schema
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run Codex for AI News validation/summarization
-        id: run_codex
-        uses: openai/codex-action@v1
+
+      - name: Upload preview artifact
+        if: ${{ steps.check.outputs.changed == 'true' }}
+        uses: actions/upload-artifact@v4
         with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          prompt-file: codex/ai-news.prompt.md 
-          # working-directory: .
-          # output-file: codex_output.md
-          # model: o3-mini
-          # codex-args: '["--max-iterations","1"]'
+          name: preview
+          path: preview.json
 
   validate-schema:
     needs: run
@@ -112,3 +98,18 @@ jobs:
       - run: pip install pyyaml
       - name: Validate news schema
         run: python scripts/validate_news_schema.py
+
+  codex-review:
+    needs: validate-schema
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Codex for AI News validation/summarization
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: codex/ai-news.prompt.md
+          # model: o3-mini
+          # codex-args: '["--max-iterations","1"]'
